@@ -89,3 +89,5 @@ Election Commission of India: https://results.eci.gov.in/ResultAcGenMay2026/inde
 
 ## Changelog
 - 2026-05-07: Initial scaffold — types, scraper, all pages, alliance simulator
+
+- [2026-05-07] init: election dashboard scaffold — Next.js 14, all pages, alliance simulator, Python scraper
