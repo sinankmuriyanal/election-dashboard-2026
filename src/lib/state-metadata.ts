@@ -2,13 +2,13 @@ import type { StateMetadata, StateSlug } from "@/types";
 
 export const STATE_METADATA: StateMetadata[] = [
   {
-    slug: "bihar",
-    name: "Bihar",
-    nameLocal: "बिहार",
-    totalSeats: 243,
-    majorityMark: 122,
-    capitalCity: "Patna",
-    countingDate: "2026-05-07",
+    slug: "puducherry",
+    name: "Puducherry",
+    nameLocal: "புதுச்சேரி",
+    totalSeats: 30,
+    majorityMark: 16,
+    capitalCity: "Puducherry",
+    countingDate: "2026-05-08",
   },
   {
     slug: "west_bengal",
@@ -17,7 +17,7 @@ export const STATE_METADATA: StateMetadata[] = [
     totalSeats: 294,
     majorityMark: 148,
     capitalCity: "Kolkata",
-    countingDate: "2026-05-07",
+    countingDate: "2026-05-08",
   },
   {
     slug: "assam",
@@ -26,7 +26,7 @@ export const STATE_METADATA: StateMetadata[] = [
     totalSeats: 126,
     majorityMark: 64,
     capitalCity: "Dispur",
-    countingDate: "2026-05-07",
+    countingDate: "2026-05-08",
   },
   {
     slug: "kerala",
@@ -35,7 +35,7 @@ export const STATE_METADATA: StateMetadata[] = [
     totalSeats: 140,
     majorityMark: 71,
     capitalCity: "Thiruvananthapuram",
-    countingDate: "2026-05-07",
+    countingDate: "2026-05-08",
   },
   {
     slug: "tamil_nadu",
@@ -44,12 +44,12 @@ export const STATE_METADATA: StateMetadata[] = [
     totalSeats: 234,
     majorityMark: 118,
     capitalCity: "Chennai",
-    countingDate: "2026-05-07",
+    countingDate: "2026-05-08",
   },
 ];
 
 export const STATE_SLUGS: StateSlug[] = [
-  "bihar",
+  "puducherry",
   "west_bengal",
   "assam",
   "kerala",
@@ -57,7 +57,7 @@ export const STATE_SLUGS: StateSlug[] = [
 ];
 
 export const STATE_NAME_MAP: Record<StateSlug, string> = {
-  bihar: "Bihar",
+  puducherry: "Puducherry",
   west_bengal: "West Bengal",
   assam: "Assam",
   kerala: "Kerala",

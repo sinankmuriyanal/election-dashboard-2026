@@ -1,12 +1,52 @@
 {
   "electionName": "Assembly Elections 2026",
   "electionYear": 2026,
-  "lastUpdated": "2026-05-07T06:00:00Z",
+  "lastUpdated": "2026-05-08T05:32:24.193535+00:00",
   "states": [
-    { "slug": "bihar", "name": "Bihar", "nameLocal": "बिहार", "totalSeats": 243, "majorityMark": 122, "capitalCity": "Patna", "countingDate": "2026-05-07" },
-    { "slug": "west_bengal", "name": "West Bengal", "nameLocal": "পশ্চিমবঙ্গ", "totalSeats": 294, "majorityMark": 148, "capitalCity": "Kolkata", "countingDate": "2026-05-07" },
-    { "slug": "assam", "name": "Assam", "nameLocal": "অসম", "totalSeats": 126, "majorityMark": 64, "capitalCity": "Dispur", "countingDate": "2026-05-07" },
-    { "slug": "kerala", "name": "Kerala", "nameLocal": "കേരളം", "totalSeats": 140, "majorityMark": 71, "capitalCity": "Thiruvananthapuram", "countingDate": "2026-05-07" },
-    { "slug": "tamil_nadu", "name": "Tamil Nadu", "nameLocal": "தமிழ்நாடு", "totalSeats": 234, "majorityMark": 118, "capitalCity": "Chennai", "countingDate": "2026-05-07" }
+    {
+      "slug": "puducherry",
+      "name": "Puducherry",
+      "nameLocal": "புதுச்சேரி",
+      "totalSeats": 30,
+      "majorityMark": 16,
+      "capitalCity": "Puducherry",
+      "countingDate": "2026-05-08"
+    },
+    {
+      "slug": "west_bengal",
+      "name": "West Bengal",
+      "nameLocal": "পশ্চিমবঙ্গ",
+      "totalSeats": 294,
+      "majorityMark": 148,
+      "capitalCity": "Kolkata",
+      "countingDate": "2026-05-08"
+    },
+    {
+      "slug": "assam",
+      "name": "Assam",
+      "nameLocal": "অসম",
+      "totalSeats": 126,
+      "majorityMark": 64,
+      "capitalCity": "Dispur",
+      "countingDate": "2026-05-08"
+    },
+    {
+      "slug": "kerala",
+      "name": "Kerala",
+      "nameLocal": "കേരളം",
+      "totalSeats": 140,
+      "majorityMark": 71,
+      "capitalCity": "Thiruvananthapuram",
+      "countingDate": "2026-05-08"
+    },
+    {
+      "slug": "tamil_nadu",
+      "name": "Tamil Nadu",
+      "nameLocal": "தமிழ்நாடு",
+      "totalSeats": 234,
+      "majorityMark": 118,
+      "capitalCity": "Chennai",
+      "countingDate": "2026-05-08"
+    }
   ]
 }

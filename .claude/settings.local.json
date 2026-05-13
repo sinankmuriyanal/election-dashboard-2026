@@ -12,7 +12,14 @@
       "Bash(git init *)",
       "Bash(git add *)",
       "Bash(git commit *)",
-      "Bash(gh repo *)"
+      "Bash(gh repo *)",
+      "Bash(pip install *)",
+      "Bash(python scrape_eci.py --state bihar --dry-run)",
+      "Bash(python scrape_eci.py --state puducherry)",
+      "Bash(python scrape_eci.py --state puducherry --dry-run)",
+      "Bash(python -m playwright install chromium)",
+      "Bash(python debug_eci.py)",
+      "Bash(echo \"exit: $?\")"
     ]
   }
 }

@@ -62,6 +62,9 @@ export const PARTY_COLORS: Record<string, string> = {
   DMDK: "#92400E",
   MNM: "#1E3A5F",
 
+  // Puducherry
+  AINRC: "#0D9488",
+
   // Generic fallback
   IND: "#64748B",
   NOTA: "#374151",

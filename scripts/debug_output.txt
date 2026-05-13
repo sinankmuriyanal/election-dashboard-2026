@@ -1,0 +1,29 @@
+
+────────────────────────────────────────────────────────────
+URL:   https://results.eci.gov.in/ResultAcGenMay2026/index.htm
+Title: Election
+Body first 800 chars:
+Election X Home Hindi Refresh Disclaimer: ECI is displaying the information as being filled in the system by the Returning
+                     Officers from their respective Counting Centres.The final data for each AC/PC will be shared in
+                     Form-20. General Election to Assembly Constituencies: Trends & Results May-2026 AC General Elections AC BYE Elections Assembly Constituencies 123 * /126 Parties Leading Won BJP 0 82 INC 0 19 BOPF 0 10 AGP 0 10 AIUDF 0 2 Details > * Status of Top Five Parties Assembly Constituencies 126 * /140 Parties Leading Won INC 0 63 CPI(M) 0 26 IUML 0 22 CPI 0 8 KEC 0 7 Details > * Status of Top Five Parties Assembly Constituencies 26 * /30 Parties Leading Won AINRC 0 12 DMK 0 5 BJP 0 4 IND 0 3 TVK 0 2 Details > * Status of Top Five Parties Asse
+
+All links on page:
+                                             → index.htm
+                                             → index.htm
+  Home                                       → index.htm
+  Hindi                                      → ./hi/index.htm
+  Refresh                                    → #
+  AC General Elections                       → javascript:void(0)
+  AC BYE Elections                           → https://results.eci.gov.in/ResultAcByeMay2026/index.htm
+  Details>                                   → partywiseresult-S03.htm
+  Details>                                   → partywiseresult-S11.htm
+  Details>                                   → partywiseresult-U07.htm
+  Details>                                   → partywiseresult-S22.htm
+  Details>                                   → partywiseresult-S25.htm
+
+All table headers found:
+  ERROR: Page.goto: Target page, context or browser has been closed
+  ERROR: Page.goto: Target page, context or browser has been closed
+  ERROR: Page.goto: Target page, context or browser has been closed
+  ERROR: Page.goto: Target page, context or browser has been closed
+  ERROR: Page.goto: Target page, context or browser has been closed

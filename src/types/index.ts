@@ -1,7 +1,7 @@
 // ── Core enums ────────────────────────────────────────────────────────────────
 
 export type StateSlug =
-  | "bihar"
+  | "puducherry"
   | "west_bengal"
   | "assam"
   | "kerala"

@@ -14,7 +14,7 @@ from pathlib import Path
 DATA_DIR = Path(__file__).parent.parent / "public" / "data"
 
 EXPECTED = {
-    "bihar":       243,
+    "puducherry":  30,
     "west_bengal": 294,
     "assam":       126,
     "kerala":      140,

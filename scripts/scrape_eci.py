@@ -1,55 +1,50 @@
 #!/usr/bin/env python3
 """
 ECI Election Results Scraper — Assembly Elections May 2026
-Scrapes https://results.eci.gov.in/ResultAcGenMay2026/ and outputs static JSON.
+Uses Playwright (real Chromium) to bypass WAF/JS challenges on results.eci.gov.in.
 
 Usage:
     cd scripts
     pip install -r requirements.txt
-    python scrape_eci.py [--state bihar] [--dry-run]
+    python -m playwright install chromium
+    python scrape_eci.py [--state puducherry] [--dry-run]
 
 Output:
-    ../public/data/{state}/results.json   — all constituency + candidate data
-    ../public/data/{state}/summary.json   — party/alliance seat tallies
-    ../public/data/index.json             — updated lastUpdated timestamp
+    ../public/data/{state}/results.json
+    ../public/data/{state}/summary.json
+    ../public/data/index.json
 """
 
 import argparse
 import json
 import re
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright, Page, Browser
+try:
+    from playwright_stealth import stealth_sync
+    HAS_STEALTH = True
+except ImportError:
+    HAS_STEALTH = False
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
 BASE_URL = "https://results.eci.gov.in/ResultAcGenMay2026"
 
 STATES = {
-    "bihar":        {"code": "S02", "name": "Bihar",       "total_seats": 243},
+    "puducherry":   {"code": "U07", "name": "Puducherry",  "total_seats": 30},
     "west_bengal":  {"code": "S22", "name": "West Bengal", "total_seats": 294},
     "assam":        {"code": "S03", "name": "Assam",       "total_seats": 126},
     "kerala":       {"code": "S11", "name": "Kerala",      "total_seats": 140},
-    "tamil_nadu":   {"code": "S21", "name": "Tamil Nadu",  "total_seats": 234},
+    "tamil_nadu":   {"code": "S25", "name": "Tamil Nadu",  "total_seats": 234},
 }
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Referer": BASE_URL + "/index.htm",
-}
-
-RATE_LIMIT = 0.5  # seconds between requests
-MAX_RETRIES = 3
+RATE_LIMIT = 0.8  # seconds between page loads
 OUTPUT_DIR = Path(__file__).parent.parent / "public" / "data"
 
 # ── Alliance map ──────────────────────────────────────────────────────────────
@@ -61,298 +56,316 @@ def load_alliance_map() -> dict:
     return {k: v for k, v in data.items() if not k.startswith("_")}
 
 
-# ── HTTP helpers ──────────────────────────────────────────────────────────────
+# ── Browser helpers ───────────────────────────────────────────────────────────
 
-session = requests.Session()
-session.headers.update(HEADERS)
+def make_browser(playwright, headless: bool = False) -> Browser:
+    """
+    headless=False opens a visible Chrome window — better bot bypass.
+    headless=True for CI/server use.
+    """
+    return playwright.chromium.launch(
+        headless=headless,
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-infobars",
+            "--start-maximized",
+        ],
+        slow_mo=200,  # slight delay between actions to appear more human
+    )
 
 
-def fetch_page(url: str, retries: int = MAX_RETRIES) -> Optional[BeautifulSoup]:
-    for attempt in range(retries):
-        try:
-            time.sleep(RATE_LIMIT)
-            resp = session.get(url, timeout=20)
-            resp.raise_for_status()
-            return BeautifulSoup(resp.text, "lxml")
-        except Exception as e:
-            wait = 2 ** attempt
-            print(f"  [retry {attempt+1}/{retries}] {url}: {e} — waiting {wait}s")
-            time.sleep(wait)
-    print(f"  [FAILED] Could not fetch: {url}")
-    return None
+def fetch_html(page: Page, url: str, wait_ms: int = 2000) -> Optional[str]:
+    """Navigate to URL and return page HTML after JS renders."""
+    try:
+        time.sleep(RATE_LIMIT)
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(wait_ms)
+        html = page.content()
+        # Detect access denied
+        if "<title>Access Denied</title>" in html or "Access Denied" in html[:500]:
+            print(f"  [ACCESS DENIED] {url}")
+            return None
+        return html
+    except Exception as e:
+        err = str(e)
+        # Re-raise if page context closed — caller should reopen
+        if "closed" in err.lower() or "Target" in err:
+            raise
+        print(f"  [ERROR] fetch_html({url}): {e}")
+        return None
+
+
+def soup(html: str) -> BeautifulSoup:
+    return BeautifulSoup(html, "lxml")
 
 
 # ── Party name normalization ──────────────────────────────────────────────────
 
-_PARTY_NORM_MAP = {
+_NORM_MAP = {
     "COMMUNIST PARTY OF INDIA  (MARXIST)": "CPI(M)",
-    "COMMUNIST PARTY OF INDIA (MARXIST)": "CPI(M)",
-    "COMMUNIST PARTY OF INDIA(MARXIST)": "CPI(M)",
-    "COMMUNIST PARTY OF INDIA (M)": "CPI(M)",
-    "COMMUNIST PARTY OF INDIA": "CPI",
-    "INDIAN NATIONAL CONGRESS": "INC",
-    "BHARATIYA JANATA PARTY": "BJP",
-    "ALL INDIA TRINAMOOL CONGRESS": "TMC",
-    "AITC": "TMC",
-    "DRAVIDA MUNNETRA KAZHAGAM": "DMK",
+    "COMMUNIST PARTY OF INDIA (MARXIST)":  "CPI(M)",
+    "COMMUNIST PARTY OF INDIA(MARXIST)":   "CPI(M)",
+    "COMMUNIST PARTY OF INDIA (M)":        "CPI(M)",
+    "COMMUNIST PARTY OF INDIA":            "CPI",
+    "INDIAN NATIONAL CONGRESS":            "INC",
+    "BHARATIYA JANATA PARTY":              "BJP",
+    "ALL INDIA TRINAMOOL CONGRESS":        "TMC",
+    "AITC":                                "TMC",
+    "DRAVIDA MUNNETRA KAZHAGAM":           "DMK",
     "ALL INDIA ANNA DRAVIDA MUNNETRA KAZHAGAM": "AIADMK",
-    "JANATA DAL (UNITED)": "JD(U)",
-    "JANATA DAL(UNITED)": "JD(U)",
-    "RASHTRIYA JANATA DAL": "RJD",
-    "BAHUJAN SAMAJ PARTY": "BSP",
-    "PEOPLES PARTY OF ARUNACHAL": "PPA",
-    "INDEPENDENT": "IND",
-    "NONE OF THE ABOVE": "NOTA",
+    "JANATA DAL (UNITED)":                 "JD(U)",
+    "JANATA DAL(UNITED)":                  "JD(U)",
+    "ALL INDIA N.R. CONGRESS":             "AINRC",
+    "ALL INDIA N R CONGRESS":              "AINRC",
+    "N.R. CONGRESS":                       "AINRC",
+    "NR CONGRESS":                         "AINRC",
+    "INDEPENDENT":                         "IND",
+    "NONE OF THE ABOVE":                   "NOTA",
 }
 
 
-def normalize_party_name(raw: str) -> str:
-    """Return canonical party short name from raw ECI string."""
-    cleaned = raw.strip().upper()
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    cleaned = cleaned.replace(" ", " ")
-
-    if cleaned in _PARTY_NORM_MAP:
-        return _PARTY_NORM_MAP[cleaned]
-
-    # Keep original but clean whitespace
-    return raw.strip()
+def normalize_party(raw: str) -> str:
+    cleaned = re.sub(r"\s+", " ", raw.strip().upper())
+    return _NORM_MAP.get(cleaned, raw.strip())
 
 
-def get_party_short(full_name: str) -> str:
-    """Return a short abbreviation — use normalized name if already short."""
-    norm = normalize_party_name(full_name)
-    # If norm is short (≤10 chars) use it directly
-    if len(norm) <= 10:
-        return norm
-    # Otherwise abbreviate: take first letters of words
-    words = norm.split()
-    abbr = "".join(w[0] for w in words if w)
-    return abbr[:8]
+# ── Index page — discover all state links ─────────────────────────────────────
 
-
-# ── Constituency URL discovery ────────────────────────────────────────────────
-
-def get_constituency_urls(state_slug: str, state_code: str) -> list[dict]:
+def discover_state_links(page: Page, state_code: str) -> list[str]:
     """
-    Fetches the state result summary page and extracts constituency links.
-    Returns list of {number, name, url} dicts.
+    Load the ECI index page and find links that reference the given state code.
+    Returns list of candidate URLs for this state's result page.
     """
-    # Primary URL pattern (party-wise with constituency links)
-    url = f"{BASE_URL}/ConstituencywiseS{state_code.replace('S', '')}.htm"
-    soup = fetch_page(url)
-
-    if soup is None:
-        # Fallback: try partywise result page
-        url = f"{BASE_URL}/partywiseresult-{state_code}.htm"
-        soup = fetch_page(url)
-
-    if soup is None:
-        print(f"  [ERROR] Could not load state page for {state_slug}")
+    print(f"  Fetching index page…")
+    html = fetch_html(page, f"{BASE_URL}/index.htm", wait_ms=3000)
+    if not html:
         return []
 
-    constituencies = []
-    links = soup.find_all("a", href=True)
+    bs = soup(html)
+    found = []
+    code_lower = state_code.lower()
 
-    for link in links:
-        href = link["href"]
-        # Look for constituency-wise result links
-        if re.search(r"constituency|Constituency|AC|ac", href) and href.endswith(".htm"):
-            text = link.get_text(strip=True)
-            # Try to extract constituency number from href or text
-            num_match = re.search(r"(\d+)", href)
-            if num_match:
-                num = int(num_match.group(1))
-                full_url = (
-                    href if href.startswith("http") else f"{BASE_URL}/{href.lstrip('/')}"
-                )
-                constituencies.append({"number": num, "name": text, "url": full_url})
+    for a in bs.find_all("a", href=True):
+        href = a["href"].strip()
+        if not href or href.startswith(("mailto:", "javascript:", "#")):
+            continue
+        href_lower = href.lower()
+        if code_lower in href_lower or state_code.replace("S", "s") in href_lower:
+            full = href if href.startswith("http") else f"{BASE_URL}/{href.lstrip('/')}"
+            found.append(full)
 
-    # Deduplicate by number
-    seen = set()
-    unique = []
-    for c in sorted(constituencies, key=lambda x: x["number"]):
-        if c["number"] not in seen:
-            seen.add(c["number"])
-            unique.append(c)
+    # Confirmed working patterns (from ECI index page analysis) — put these first
+    code_num = re.sub(r"\D", "", state_code)
+    prefix = state_code[0]
+    patterns = [
+        f"{BASE_URL}/partywiseresult-{state_code}.htm",   # confirmed working
+        f"{BASE_URL}/ConstituencywiseResult-{state_code}.htm",
+        f"{BASE_URL}/ConstituencywiseResult{state_code}.htm",
+        f"{BASE_URL}/Constituencywise{state_code}.htm",
+        f"{BASE_URL}/partywiseresult{state_code}.htm",
+        f"{BASE_URL}/PartyWiseResult{state_code}.htm",
+        f"{BASE_URL}/AcResult{state_code}.htm",
+    ]
+    # Put patterns first (confirmed), then links from index
+    return list(dict.fromkeys(patterns + found))  # dedup preserving order
 
-    return unique
+
+# ── State result page — find constituency links ───────────────────────────────
+
+def get_constituency_links(page: Page, state_slug: str, state_code: str) -> list[dict]:
+    """Try each candidate URL until we find a page with constituency data."""
+    candidate_urls = discover_state_links(page, state_code)
+
+    for url in candidate_urls:
+        print(f"    Trying {url} …", end=" ", flush=True)
+        html = fetch_html(page, url, wait_ms=2000)
+        if not html:
+            print("no response")
+            continue
+
+        bs = soup(html)
+        links = []
+        for a in bs.find_all("a", href=True):
+            href = a["href"].strip()
+            text = a.get_text(strip=True)
+            # Look for candidate-wise or AC-wise result links
+            if re.search(r"candidate|CandidateWise|AcResult|acresult", href, re.I):
+                num_match = re.search(r"(\d+)", href)
+                if num_match:
+                    num = int(num_match.group(1))
+                    full = href if href.startswith("http") else f"{BASE_URL}/{href.lstrip('/')}"
+                    links.append({"number": num, "name": text or f"AC {num}", "url": full})
+
+        if links:
+            print(f"found {len(links)} constituency links")
+            # Deduplicate by number
+            seen = set()
+            unique = []
+            for lnk in sorted(links, key=lambda x: x["number"]):
+                if lnk["number"] not in seen:
+                    seen.add(lnk["number"])
+                    unique.append(lnk)
+            return unique
+
+        # Also check if the page itself IS a constituency list (table rows)
+        tables = bs.find_all("table")
+        rows_with_ac = 0
+        for t in tables:
+            for tr in t.find_all("tr"):
+                cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+                if cells and cells[0].isdigit():
+                    rows_with_ac += 1
+        if rows_with_ac > 5:
+            print(f"found table with {rows_with_ac} rows (will parse inline)")
+            return [{"number": -1, "name": "inline", "url": url, "_html": html}]
+
+        print("no constituency data")
+
+    return []
 
 
-# ── Candidate detail page parser ──────────────────────────────────────────────
+# ── Candidate page parser ─────────────────────────────────────────────────────
 
-def parse_candidate_page(url: str, alliance_map: dict) -> Optional[dict]:
-    """
-    Parses a single constituency's detailed result page.
-    Returns a dict with candidates list, or None on failure.
-    """
-    soup = fetch_page(url)
-    if soup is None:
+def parse_candidate_page(page: Page, url: str, alliance_map: dict,
+                         pre_html: str = None) -> Optional[dict]:
+    html = pre_html or fetch_html(page, url, wait_ms=1500)
+    if not html:
         return None
 
-    # Find the main results table — ECI pages have a table with candidate rows
-    tables = soup.find_all("table")
+    bs = soup(html)
+    tables = bs.find_all("table")
     candidates_table = None
 
     for table in tables:
-        headers_text = " ".join(
-            th.get_text(strip=True).lower()
-            for th in table.find_all(["th", "td"])
-        )
-        if any(
-            kw in headers_text
-            for kw in ["candidate", "party", "votes", "total votes"]
-        ):
+        text = " ".join(c.get_text(" ", strip=True).lower() for c in table.find_all(["th", "td"]))
+        if "candidate" in text and ("votes" in text or "vote" in text):
             candidates_table = table
             break
 
-    if candidates_table is None:
+    if not candidates_table:
+        # Try any table with enough columns
+        for table in tables:
+            rows = table.find_all("tr")
+            if len(rows) > 3:
+                cells = rows[0].find_all(["th", "td"])
+                if len(cells) >= 4:
+                    candidates_table = table
+                    break
+
+    if not candidates_table:
         return None
 
     rows = candidates_table.find_all("tr")
-    candidates = []
-    winner_votes = -1
-
-    # Find header row to identify column positions
-    header_row = None
     col_map = {}
+    header_row = 0
+
     for i, row in enumerate(rows):
-        cells = row.find_all(["th", "td"])
-        cell_texts = [c.get_text(strip=True).lower() for c in cells]
-        if any("candidate" in t or "party" in t for t in cell_texts):
-            header_row = i
-            for j, text in enumerate(cell_texts):
-                if "sl" in text or "#" in text or "no" in text:
+        cells = [c.get_text(strip=True).lower() for c in row.find_all(["th", "td"])]
+        if any("candidate" in c or "party" in c for c in cells):
+            for j, c in enumerate(cells):
+                if "sl" in c or (c.strip() in ("#", "no", "sno")):
                     col_map["sl"] = j
-                elif "candidate" in text:
+                elif "candidate" in c:
                     col_map["name"] = j
-                elif "party" in text:
+                elif "party" in c:
                     col_map["party"] = j
-                elif "total votes" in text or "votes" in text:
-                    if "votes" not in col_map:
-                        col_map["votes"] = j
-                elif "%" in text or "percent" in text:
+                elif "total" in c and "vote" in c:
+                    col_map["votes"] = j
+                elif "vote" in c and "votes" not in col_map:
+                    col_map["votes"] = j
+                elif "%" in c or "pct" in c or "percent" in c:
                     col_map["pct"] = j
-                elif "status" in text or "won" in text or "result" in text:
+                elif "status" in c or "result" in c or "won" in c:
                     col_map["status"] = j
+            header_row = i
             break
 
-    if not col_map or "name" not in col_map:
-        # Fallback: assume positional columns
+    if not col_map:
         col_map = {"sl": 0, "name": 1, "party": 2, "votes": 3, "pct": 4, "status": 5}
-        header_row = 0
 
-    start_row = (header_row or 0) + 1
-
-    for row in rows[start_row:]:
+    candidates = []
+    for row in rows[header_row + 1:]:
         cells = row.find_all(["td", "th"])
         if len(cells) < 3:
             continue
 
         def cell(idx: int) -> str:
-            if idx < len(cells):
-                return cells[idx].get_text(strip=True)
-            return ""
+            return cells[idx].get_text(strip=True) if idx < len(cells) else ""
 
         name = cell(col_map.get("name", 1))
-        if not name or name.lower() in ("candidate", "total", ""):
+        if not name or name.lower() in ("candidate", "total", "grand total", ""):
             continue
 
         raw_party = cell(col_map.get("party", 2))
-        votes_str = re.sub(r"[^0-9]", "", cell(col_map.get("votes", 3)))
-        votes = int(votes_str) if votes_str else 0
-        pct_str = re.sub(r"[^0-9.]", "", cell(col_map.get("pct", 4)))
-        pct = float(pct_str) if pct_str else 0.0
-        status_text = cell(col_map.get("status", 5)).lower()
+        votes_raw = re.sub(r"[^0-9]", "", cell(col_map.get("votes", 3)))
+        votes = int(votes_raw) if votes_raw else 0
+        pct_raw = re.sub(r"[^0-9.]", "", cell(col_map.get("pct", 4)))
+        pct = float(pct_raw) if pct_raw else 0.0
+        status_txt = cell(col_map.get("status", 5)).lower()
 
-        party_short = normalize_party_name(raw_party) if raw_party else "IND"
-        alliance = alliance_map.get(party_short)
-
-        is_winner = "won" in status_text or "winner" in status_text
-        if votes > winner_votes:
-            winner_votes = votes
-            # Mark as likely winner — will validate after sorting
+        ps = normalize_party(raw_party) if raw_party else "IND"
+        alliance = alliance_map.get(ps)
 
         candidates.append({
             "name": name,
             "party": raw_party.strip() if raw_party else "Independent",
-            "partyShort": party_short,
+            "partyShort": ps,
             "alliance": alliance,
             "votes": votes,
             "votePct": pct,
-            "isWinner": is_winner,
+            "isWinner": False,
         })
 
     if not candidates:
         return None
 
-    # Sort by votes descending
     candidates.sort(key=lambda c: c["votes"], reverse=True)
+    candidates[0]["isWinner"] = True
 
-    # Ensure exactly one winner (highest vote-getter)
-    for i, cand in enumerate(candidates):
-        cand["isWinner"] = i == 0
-
-    # Recalculate vote percentages if missing
     total_votes = sum(c["votes"] for c in candidates)
     if total_votes > 0:
-        for cand in candidates:
-            if cand["votePct"] == 0 and cand["votes"] > 0:
-                cand["votePct"] = round(cand["votes"] / total_votes * 100, 2)
+        for c in candidates:
+            if c["votePct"] == 0 and c["votes"] > 0:
+                c["votePct"] = round(c["votes"] / total_votes * 100, 2)
 
-    return {
-        "candidates": candidates,
-        "totalVotes": total_votes,
-    }
+    return {"candidates": candidates, "totalVotes": total_votes}
 
 
-# ── State summary page parser (fallback for constituency names/districts) ─────
+# ── State name / district extraction from summary page ────────────────────────
 
-def parse_state_summary_page(state_code: str) -> dict[str, dict]:
-    """
-    Parses the party-wise or constituency-wise summary page for a state.
-    Returns a dict keyed by constituency number with name and district info.
-    """
+def extract_ac_info_from_page(page: Page, state_code: str) -> dict[int, dict]:
+    """Try to get constituency name + district from the state summary page."""
     info = {}
-
-    # Try constituency-wise summary
-    for url_template in [
-        f"{BASE_URL}/ConstituencywiseS{state_code.replace('S','')}.htm",
-        f"{BASE_URL}/ConstituencyWiseS{state_code.replace('S','')}.htm",
-        f"{BASE_URL}/constwise{state_code.lower()}.htm",
-    ]:
-        soup = fetch_page(url_template)
-        if soup is None:
+    code_num = re.sub(r"\D", "", state_code)
+    urls_to_try = [
+        f"{BASE_URL}/ConstituencywiseResult{state_code}.htm",
+        f"{BASE_URL}/partywiseresult-{state_code}.htm",
+    ]
+    for url in urls_to_try:
+        html = fetch_html(page, url, wait_ms=2000)
+        if not html:
             continue
-
-        tables = soup.find_all("table")
-        for table in tables:
-            rows = table.find_all("tr")
-            for row in rows:
-                cells = row.find_all(["td", "th"])
-                if len(cells) < 3:
-                    continue
-                texts = [c.get_text(strip=True) for c in cells]
-                # Look for rows with constituency number + name + district
-                if texts[0].isdigit():
-                    num = int(texts[0])
-                    name = texts[1] if len(texts) > 1 else ""
-                    district = texts[2] if len(texts) > 2 else ""
+        bs = soup(html)
+        for table in bs.find_all("table"):
+            for row in table.find_all("tr"):
+                cells = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
+                if len(cells) >= 2 and cells[0].isdigit():
+                    num = int(cells[0])
+                    name = cells[1] if len(cells) > 1 else ""
+                    district = cells[2] if len(cells) > 2 else ""
                     if name:
                         info[num] = {"name": name, "district": district}
         if info:
             break
-
     return info
 
 
-# ── Main scrape function per state ────────────────────────────────────────────
+# ── Main state scraper ────────────────────────────────────────────────────────
 
-def scrape_state(state_slug: str, state_meta: dict, alliance_map: dict, dry_run: bool = False) -> dict:
-    """
-    Scrapes all constituency results for a state.
-    Returns the full state data dict.
-    """
+def scrape_state(page: Page, state_slug: str, state_meta: dict,
+                 alliance_map: dict, dry_run: bool = False) -> dict:
     state_code = state_meta["code"]
     state_name = state_meta["name"]
     total_seats = state_meta["total_seats"]
@@ -361,62 +374,65 @@ def scrape_state(state_slug: str, state_meta: dict, alliance_map: dict, dry_run:
     print(f"Scraping {state_name} ({state_code}) — {total_seats} seats")
     print(f"{'='*60}")
 
-    # Step 1: Get state summary info (constituency names + districts)
-    print("  Loading state summary page…")
-    summary_info = parse_state_summary_page(state_code)
-    print(f"  Found {len(summary_info)} constituencies in summary")
+    # Get AC info (names, districts)
+    print("  Getting AC names/districts…")
+    ac_info = extract_ac_info_from_page(page, state_code)
+    print(f"  Got info for {len(ac_info)} ACs")
 
-    # Step 2: Discover constituency detail URLs
-    constituency_urls = get_constituency_urls(state_slug, state_code)
-    print(f"  Discovered {len(constituency_urls)} constituency links")
+    # Discover constituency detail page links
+    print("  Discovering constituency links…")
+    const_links = get_constituency_links(page, state_slug, state_code)
+    print(f"  Found {len(const_links)} constituency links")
 
-    if not constituency_urls and not summary_info:
-        print(f"  [WARN] No constituency data found for {state_name}")
-        # Return empty structure
+    if not const_links and not ac_info:
+        print(f"  [WARN] No data discoverable for {state_name} — leaving empty")
         return build_empty_state(state_slug, state_name, total_seats)
 
-    # If we have summary info but no URLs, build placeholder URLs
-    if not constituency_urls:
-        for num in sorted(summary_info.keys()):
-            info = summary_info[num]
-            # Try standard URL pattern
-            url = f"{BASE_URL}/CandidateWiseResult-{state_code}-{num}.htm"
-            constituency_urls.append({
+    # If no links but have AC info, build URLs with known patterns
+    if not const_links and ac_info:
+        for num in sorted(ac_info.keys()):
+            const_links.append({
                 "number": num,
-                "name": info.get("name", f"Constituency {num}"),
-                "url": url,
+                "name": ac_info[num].get("name", f"AC {num}"),
+                "url": f"{BASE_URL}/CandidateWiseResult-{state_code}-{num}.htm",
             })
+        print(f"  Built {len(const_links)} URLs from AC info")
 
-    # Step 3: Scrape each constituency
+    if dry_run:
+        print(f"  [DRY RUN] Would scrape {len(const_links)} pages")
+        for lnk in const_links[:5]:
+            print(f"    {lnk['number']:3d}. {lnk['name'][:40]} → {lnk['url']}")
+        if len(const_links) > 5:
+            print(f"    … and {len(const_links)-5} more")
+        return build_empty_state(state_slug, state_name, total_seats)
+
+    # Scrape each constituency
     constituencies = []
-    total = len(constituency_urls)
+    total = len(const_links)
 
-    for i, c_info in enumerate(constituency_urls):
-        num = c_info["number"]
-        name = summary_info.get(num, {}).get("name", c_info.get("name", f"Constituency {num}"))
-        district = summary_info.get(num, {}).get("district", "")
-        url = c_info["url"]
+    for i, lnk in enumerate(const_links):
+        num = lnk["number"]
+        name = ac_info.get(num, {}).get("name") or lnk.get("name") or f"AC {num}"
+        district = ac_info.get(num, {}).get("district", "")
+        url = lnk["url"]
+        pre_html = lnk.get("_html")
 
         print(f"  [{i+1}/{total}] {name} ({num}) … ", end="", flush=True)
 
-        if dry_run:
-            print("SKIP (dry-run)")
-            continue
+        result = parse_candidate_page(page, url, alliance_map, pre_html=pre_html)
 
-        result = parse_candidate_page(url, alliance_map)
         if result is None:
-            print(f"FAILED — trying alternate URL")
             # Try alternate URL patterns
-            for alt_url in [
+            for alt in [
                 f"{BASE_URL}/CandidateWiseResult-{state_code}-{num:02d}.htm",
                 f"{BASE_URL}/CandidateWiseResult{state_code}{num}.htm",
-                f"{BASE_URL}/cand{state_code.lower()}{num}.htm",
+                f"{BASE_URL}/AcResult-{state_code}-{num}.htm",
             ]:
-                result = parse_candidate_page(alt_url, alliance_map)
+                result = parse_candidate_page(page, alt, alliance_map)
                 if result:
                     break
 
-        if result is None or not result.get("candidates"):
+        if not result or not result.get("candidates"):
             print("SKIPPED (no data)")
             continue
 
@@ -427,127 +443,99 @@ def scrape_state(state_slug: str, state_meta: dict, alliance_map: dict, dry_run:
         margin = winner["votes"] - runner_up["votes"]
         margin_pct = round(margin / total_votes * 100, 2) if total_votes > 0 else 0.0
 
-        constituency = {
+        constituencies.append({
             "id": f"{state_slug}-{num:03d}",
             "assemblyNumber": num,
             "name": name,
             "state": state_slug,
             "district": district,
-            "winner": {k: v for k, v in winner.items()},
-            "runnerUp": {k: v for k, v in runner_up.items()},
+            "winner": winner,
+            "runnerUp": runner_up,
             "margin": margin,
             "marginPct": margin_pct,
             "totalVotes": total_votes,
             "turnout": None,
             "status": "won",
             "candidates": cands,
-        }
-        constituencies.append(constituency)
+        })
         print(f"OK — {winner['name']} ({winner['partyShort']}) +{margin:,}")
 
-    print(f"\n  Scraped {len(constituencies)}/{total_seats} constituencies for {state_name}")
-
-    # Step 4: Compute summary
-    summary = compute_state_summary(
-        state_slug, state_name, total_seats, constituencies, alliance_map
-    )
-
+    print(f"\n  Scraped {len(constituencies)}/{total_seats} constituencies")
+    summary = compute_state_summary(state_slug, state_name, total_seats, constituencies)
     return {"summary": summary, "constituencies": constituencies}
 
+
+# ── Summary computation ───────────────────────────────────────────────────────
 
 def build_empty_state(state_slug: str, state_name: str, total_seats: int) -> dict:
     return {
         "summary": {
-            "state": state_slug,
-            "stateName": state_name,
-            "totalSeats": total_seats,
-            "seatsReported": 0,
-            "seatsLeading": 0,
-            "seatsWon": 0,
+            "state": state_slug, "stateName": state_name,
+            "totalSeats": total_seats, "seatsReported": 0,
+            "seatsLeading": 0, "seatsWon": 0,
             "majorityMark": total_seats // 2 + 1,
             "lastUpdated": datetime.now(timezone.utc).isoformat(),
-            "allianceTallies": [],
-            "partyTallies": [],
+            "allianceTallies": [], "partyTallies": [],
         },
         "constituencies": [],
     }
 
 
-def compute_state_summary(
-    state_slug: str,
-    state_name: str,
-    total_seats: int,
-    constituencies: list[dict],
-    alliance_map: dict,
-) -> dict:
-    """Aggregate seat and vote counts by party and alliance."""
-    from collections import defaultdict
-
-    party_seats = defaultdict(int)
-    party_votes = defaultdict(int)
-    party_meta = {}
-    total_valid_votes = 0
+def compute_state_summary(state_slug, state_name, total_seats, constituencies) -> dict:
+    party_seats  = defaultdict(int)
+    party_votes  = defaultdict(int)
+    party_meta   = {}
+    total_valid  = 0
 
     for c in constituencies:
         w = c["winner"]
         ps = w["partyShort"]
         party_seats[ps] += 1
         party_votes[ps] += w["votes"]
-        if ps not in party_meta:
-            party_meta[ps] = {"party": w["party"], "alliance": w["alliance"]}
-        total_valid_votes += c["totalVotes"]
+        party_meta.setdefault(ps, {"party": w["party"], "alliance": w["alliance"]})
+        total_valid += c["totalVotes"]
 
-    # Compute alliance tallies
-    alliance_seats = defaultdict(int)
-    alliance_votes = defaultdict(int)
+    alliance_seats  = defaultdict(int)
+    alliance_votes  = defaultdict(int)
     alliance_parties = defaultdict(list)
 
     for ps, seats in party_seats.items():
-        meta = party_meta.get(ps, {})
-        alliance = meta.get("alliance") or "Others"
-        alliance_seats[alliance] += seats
-        alliance_votes[alliance] += party_votes[ps]
+        al = party_meta[ps].get("alliance") or "Others"
+        alliance_seats[al] += seats
+        alliance_votes[al] += party_votes[ps]
 
-    # Build party tally list (sorted by seats)
-    party_tallies = []
-    for ps, seats in sorted(party_seats.items(), key=lambda x: -x[1]):
-        meta = party_meta.get(ps, {})
-        alliance = meta.get("alliance") or "Others"
-        vote_pct = round(party_votes[ps] / total_valid_votes * 100, 2) if total_valid_votes else 0.0
-        party_tallies.append({
-            "party": meta.get("party", ps),
-            "partyShort": ps,
-            "alliance": meta.get("alliance"),
-            "seats": seats,
-            "totalVotes": party_votes[ps],
-            "votePct": vote_pct,
-            "color": "#94A3B8",  # placeholder — overridden by frontend color map
-        })
-        alliance_parties[alliance].append({
-            "partyShort": ps,
-            "seats": seats,
-        })
-
-    # Build alliance tally list (sorted by seats)
     alliance_tallies = []
-    for alliance, seats in sorted(alliance_seats.items(), key=lambda x: -x[1]):
-        vote_pct = round(alliance_votes[alliance] / total_valid_votes * 100, 2) if total_valid_votes else 0.0
+    for al, seats in sorted(alliance_seats.items(), key=lambda x: -x[1]):
+        vp = round(alliance_votes[al] / total_valid * 100, 2) if total_valid else 0.0
+        parties = [
+            {"partyShort": ps, "seats": s}
+            for ps, s in party_seats.items()
+            if (party_meta[ps].get("alliance") or "Others") == al
+        ]
         alliance_tallies.append({
-            "alliance": alliance,
-            "seats": seats,
-            "totalVotes": alliance_votes[alliance],
-            "votePct": vote_pct,
-            "color": "#94A3B8",  # overridden by frontend
-            "parties": alliance_parties[alliance],
+            "alliance": al, "seats": seats,
+            "totalVotes": alliance_votes[al], "votePct": vp,
+            "color": "#94A3B8", "parties": parties,
         })
+        for ps in [p["partyShort"] for p in parties]:
+            alliance_parties[al].append(ps)
+
+    party_tallies = [
+        {
+            "party": party_meta[ps]["party"], "partyShort": ps,
+            "alliance": party_meta[ps].get("alliance"),
+            "seats": party_seats[ps],
+            "totalVotes": party_votes[ps],
+            "votePct": round(party_votes[ps] / total_valid * 100, 2) if total_valid else 0.0,
+            "color": "#94A3B8",
+        }
+        for ps in sorted(party_seats, key=lambda x: -party_seats[x])
+    ]
 
     return {
-        "state": state_slug,
-        "stateName": state_name,
-        "totalSeats": total_seats,
-        "seatsReported": len(constituencies),
-        "seatsLeading": 0,
-        "seatsWon": len(constituencies),
+        "state": state_slug, "stateName": state_name,
+        "totalSeats": total_seats, "seatsReported": len(constituencies),
+        "seatsLeading": 0, "seatsWon": len(constituencies),
         "majorityMark": total_seats // 2 + 1,
         "lastUpdated": datetime.now(timezone.utc).isoformat(),
         "allianceTallies": alliance_tallies,
@@ -561,24 +549,23 @@ def write_state_data(state_slug: str, data: dict) -> None:
     state_dir = OUTPUT_DIR / state_slug
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    results_path = state_dir / "results.json"
-    summary_path = state_dir / "summary.json"
-
-    with open(results_path, "w", encoding="utf-8") as f:
+    utf8 = "utf-8"
+    with open(state_dir / "results.json", "w", encoding=utf8) as f:
         json.dump(data["constituencies"], f, ensure_ascii=False, separators=(",", ":"))
 
-    with open(summary_path, "w", encoding="utf-8") as f:
+    with open(state_dir / "summary.json", "w", encoding=utf8) as f:
         json.dump(data["summary"], f, ensure_ascii=False, indent=2)
 
-    print(f"  Written: {results_path} ({len(data['constituencies'])} constituencies)")
-    print(f"  Written: {summary_path}")
+    print(f"  Written: {state_dir}/results.json ({len(data['constituencies'])} constituencies)")
+    print(f"  Written: {state_dir}/summary.json")
 
 
 def update_index_timestamp() -> None:
     index_path = OUTPUT_DIR / "index.json"
     if index_path.exists():
         with open(index_path, encoding="utf-8") as f:
-            data = json.load(f)
+            raw = f.read().lstrip("﻿")
+            data = json.loads(raw)
         data["lastUpdated"] = datetime.now(timezone.utc).isoformat()
         with open(index_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -588,38 +575,71 @@ def update_index_timestamp() -> None:
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Scrape ECI election results")
-    parser.add_argument(
-        "--state",
-        choices=list(STATES.keys()) + ["all"],
-        default="all",
-        help="Which state to scrape (default: all)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Discover URLs but do not fetch constituency pages",
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--state", choices=list(STATES.keys()) + ["all"], default="all")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--headless", action="store_true", help="Run browser in headless mode (default: visible)")
     args = parser.parse_args()
 
     alliance_map = load_alliance_map()
-    print(f"Loaded {len(alliance_map)} party-to-alliance mappings")
+    print(f"Loaded {len(alliance_map)} alliance mappings")
 
     states_to_scrape = (
-        {args.state: STATES[args.state]}
-        if args.state != "all"
-        else STATES
+        {args.state: STATES[args.state]} if args.state != "all" else STATES
     )
 
     start = time.time()
-    for slug, meta in states_to_scrape.items():
-        data = scrape_state(slug, meta, alliance_map, dry_run=args.dry_run)
-        if not args.dry_run:
-            write_state_data(slug, data)
+    with sync_playwright() as pw:
+        browser = make_browser(pw, headless=args.headless)
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 900},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            locale="en-IN",
+        )
+        def new_page():
+            p = context.new_page()
+            if HAS_STEALTH:
+                stealth_sync(p)
+            return p
+
+        # Warm up — visit index once to pick up cookies/session
+        print("Warming browser session…")
+        try:
+            warm_page = new_page()
+            warm_page.goto(f"{BASE_URL}/index.htm", wait_until="domcontentloaded", timeout=30000)
+            warm_page.wait_for_timeout(3000)
+            print(f"  Index page loaded: {warm_page.title()}")
+            warm_page.close()
+            time.sleep(1)
+        except Exception as e:
+            print(f"  Warning: warmup failed ({e}), continuing anyway")
+
+        for slug, meta in states_to_scrape.items():
+            # Fresh page per state
+            page = new_page()
+            if HAS_STEALTH:
+                stealth_sync(page)
+            try:
+                data = scrape_state(page, slug, meta, alliance_map, dry_run=args.dry_run)
+            except Exception as e:
+                print(f"  [FATAL] {slug}: {e}")
+                data = build_empty_state(slug, meta["name"], meta["total_seats"])
+            finally:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            if not args.dry_run:
+                write_state_data(slug, data)
+
+        browser.close()
 
     update_index_timestamp()
-    elapsed = time.time() - start
-    print(f"\nDone in {elapsed:.0f}s")
+    print(f"\nDone in {time.time()-start:.0f}s")
 
 
 if __name__ == "__main__":
